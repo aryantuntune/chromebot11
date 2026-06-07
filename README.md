@@ -13,7 +13,9 @@ For each target consumer ID the bot:
 
 1. Looks the ID up in the master to get that account's **email** + **password**.
 2. Opens the HP Gas login page in a fresh Chrome window and fills the email.
-3. **Pauses so you solve the CAPTCHA** (the only manual step).
+3. **Solves the CAPTCHA automatically** with OCR (`ddddocr`). The portal allows
+   unlimited tries, so a wrong guess just refreshes and retries — no human
+   needed. (Set `BOT_AUTO_CAPTCHA=0` to type it yourself instead.)
 4. Auto-fills the password, logs in, and opens **"View Cylinder Booking
    history"**.
 5. Reads the latest booking's delivery cell — when a cylinder is **out for
@@ -108,6 +110,10 @@ $env:BOT_BROWSER = "edge"     # chrome (default) | edge | brave | opera
 
 | Variable | Effect |
 |----------|--------|
+| `BOT_AUTO_CAPTCHA` | `1` (default) solves the CAPTCHA automatically with OCR; `0` falls back to a human typing it |
+| `BOT_HEADLESS` | `1` runs with no visible browser window (fine once the CAPTCHA is automated). Default visible. |
+| `BOT_CAPTCHA_TRIES` | Max OCR attempts per account before giving up (default `15`). The site allows unlimited tries. |
+| `BOT_CAPTCHA_DATASET` | `1` (default) saves each confirmed-correct CAPTCHA to `output/captcha_dataset/` for future model training |
 | `BOT_BROWSER` | `chrome` (default), `edge`, `brave`, or `opera` |
 | `BOT_MAX_ROWS` | Process only the first N targets (handy for a test run) |
 | `BOT_DEBUG` | Save a screenshot + page text/HTML per account to `output/debug/` |

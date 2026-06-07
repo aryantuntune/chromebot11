@@ -11,8 +11,9 @@ __pycache__/
 # OS cruft
 .DS_Store
 
-# Generated Excel output (but keep the folder marker)
-output/*.xlsx
+# Generated output: result spreadsheets, OTPs, captcha samples/dataset, page
+# dumps, stats -- all local artifacts, never committed (keep the folder marker).
+output/*
 !output/.gitkeep
 
 # User-provided Excel input (but keep the folder marker)

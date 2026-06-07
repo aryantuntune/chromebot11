@@ -24,9 +24,12 @@ stop; progress is saved incrementally after each completed row.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import os
 import pathlib
+import re
 import sys
 import time
 
@@ -39,7 +42,9 @@ from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 # Settings (kept inline; the YAML config model does not fit this staged flow).
 # --------------------------------------------------------------------------- #
 LOGIN_URL = "https://myhpgas.in/myHPGas/PortalLogin.aspx"
-HEADLESS = False             # MUST be headed so the human can solve the CAPTCHA
+# Headed by default. With auto-CAPTCHA no human is needed, so you can run
+# invisibly with BOT_HEADLESS=1.
+HEADLESS = os.environ.get("BOT_HEADLESS", "").strip().lower() in ("1", "true", "yes")
 
 # Which browser to drive. Override with BOT_BROWSER=chrome|edge|brave|opera.
 # The booking page on this portal is flaky; if one browser loads it poorly,
@@ -59,6 +64,8 @@ CAPTCHA_SOLVE_TIMEOUT_MS = 300_000  # 5 minutes per row
 # Selectors captured by the recorder.
 SEL_EMAIL = "#ContentPlaceHolder1_txtUserNameEmail"
 SEL_CAPTCHA = "#ContentPlaceHolder1_loginCaptcha_tbCaptchaInput"
+SEL_CAPTCHA_IMG = "#ContentPlaceHolder1_loginCaptcha_imgCaptcha"
+SEL_CAPTCHA_REFRESH = "#ContentPlaceHolder1_loginCaptcha_btnRefreshCaptcha"
 SEL_PASSWORD = "#ContentPlaceHolder1_txtPassword"
 SEL_LOGIN_BTN = "#ContentPlaceHolder1_btnLogin"
 
@@ -108,6 +115,14 @@ DEBUG_DUMP = os.environ.get("BOT_DEBUG", "").strip() not in ("", "0", "false", "
 SETTLE_MS = int(os.environ.get("BOT_SETTLE_MS", "3000"))    # after login, before opening booking
 BETWEEN_MS = int(os.environ.get("BOT_BETWEEN_MS", "3000"))  # pause between accounts
 
+# Auto-solve the CAPTCHA with OCR (ddddocr) instead of a human. The portal
+# allows unlimited tries, so a wrong guess just refreshes and we try again.
+AUTO_CAPTCHA = os.environ.get("BOT_AUTO_CAPTCHA", "1").strip().lower() not in ("0", "false", "no")
+CAPTCHA_MAX_TRIES = int(os.environ.get("BOT_CAPTCHA_TRIES", "15"))
+# Save every confirmed-correct (image, text) pair, building a training set that
+# the solver can be fine-tuned on over time.
+COLLECT_CAPTCHA = os.environ.get("BOT_CAPTCHA_DATASET", "1").strip().lower() not in ("0", "false", "no")
+
 
 def _setup_logging() -> None:
     logging.basicConfig(
@@ -154,6 +169,107 @@ def _wait_for_captcha_solved(page, email: str) -> None:
         f"({SEL_PASSWORD!r}) never appeared within "
         f"{CAPTCHA_SOLVE_TIMEOUT_MS // 1000}s."
     )
+
+
+# --------------------------------------------------------------------------- #
+# Automatic CAPTCHA solving (OCR) with self-collected training data.
+# --------------------------------------------------------------------------- #
+_OCR = None
+_CAP_STATS = {"attempts": 0, "successes": 0, "first_try": 0, "accounts_solved": 0}
+
+
+def _get_ocr():
+    """Lazily build the ddddocr solver once (imported here so manual mode needs
+    no extra dependency)."""
+    global _OCR
+    if _OCR is None:
+        import ddddocr
+        _OCR = ddddocr.DdddOcr(show_ad=False)
+    return _OCR
+
+
+def _refresh_captcha(page) -> None:
+    """Click the CAPTCHA refresh link to load a fresh image."""
+    try:
+        page.locator(SEL_CAPTCHA_REFRESH).click()
+        page.wait_for_timeout(700)
+    except Exception:  # noqa: BLE001 - best-effort
+        pass
+
+
+def _save_captcha_sample(img_bytes: bytes, label: str) -> None:
+    """Save a CONFIRMED-correct CAPTCHA as ``<label>_<md5>.png`` for training.
+
+    Success proves the label is correct, so this builds a free, accurately
+    labelled dataset that a custom model can later be fine-tuned on.
+    """
+    if not COLLECT_CAPTCHA:
+        return
+    try:
+        d = pathlib.Path(OUTPUT_DIR) / "captcha_dataset"
+        d.mkdir(parents=True, exist_ok=True)
+        h = hashlib.md5(img_bytes).hexdigest()[:10]
+        (d / f"{label}_{h}.png").write_bytes(img_bytes)
+    except Exception:  # noqa: BLE001 - best-effort
+        pass
+
+
+def _save_captcha_stats() -> None:
+    """Write rolling solver accuracy so improvement over time is visible."""
+    try:
+        s = dict(_CAP_STATS)
+        s["overall_solve_rate_pct"] = round(
+            (s["successes"] / s["attempts"] * 100) if s["attempts"] else 0, 1)
+        s["first_try_rate_pct"] = round(
+            (s["first_try"] / s["accounts_solved"] * 100) if s["accounts_solved"] else 0, 1)
+        (pathlib.Path(OUTPUT_DIR) / "captcha_stats.json").write_text(
+            json.dumps(s, indent=2))
+    except Exception:  # noqa: BLE001 - best-effort
+        pass
+
+
+def _auto_solve_captcha(page) -> bool:
+    """Read and submit the CAPTCHA with OCR until the password field appears.
+
+    The portal allows unlimited tries: a wrong guess keeps the same image, so we
+    click refresh for a new one and retry, up to ``CAPTCHA_MAX_TRIES``. Each
+    confirmed-correct image is saved for training and stats are updated.
+    """
+    log = logging.getLogger("bot")
+    ocr = _get_ocr()
+    pwd = page.locator(SEL_PASSWORD).first
+    img_loc = page.locator(SEL_CAPTCHA_IMG)
+    for attempt in range(1, CAPTCHA_MAX_TRIES + 1):
+        try:
+            img = img_loc.screenshot()
+        except Exception:  # noqa: BLE001 - page not ready
+            return False
+        guess = re.sub(r"[^a-z0-9]", "", ocr.classification(img).lower())
+        _CAP_STATS["attempts"] += 1
+        if len(guess) != 6:
+            # The CAPTCHA is always 6 chars; a different length means a misread.
+            _refresh_captcha(page)
+            continue
+        try:
+            page.fill(SEL_CAPTCHA, guess)
+            page.locator(SEL_CAPTCHA).press("Enter")
+            pwd.wait_for(state="visible", timeout=4_000)
+        except PlaywrightTimeoutError:
+            _refresh_captcha(page)   # wrong guess -> fresh image, try again
+            continue
+        except Exception:  # noqa: BLE001 - transient; refresh and retry
+            _refresh_captcha(page)
+            continue
+        _CAP_STATS["successes"] += 1
+        _CAP_STATS["accounts_solved"] += 1
+        if attempt == 1:
+            _CAP_STATS["first_try"] += 1
+        _save_captcha_sample(img, guess)
+        _save_captcha_stats()
+        log.info("    CAPTCHA auto-solved in %d attempt(s) -> %r", attempt, guess)
+        return True
+    log.warning("    CAPTCHA not solved within %d attempts.", CAPTCHA_MAX_TRIES)
+    return False
 
 
 def _debug_dump(page, tag: str) -> None:
@@ -257,6 +373,7 @@ def _txt(value) -> str:
 # (as opposed to a real status like an OTP, 'Delivered', or 'In process').
 _RETRY_MARKERS = (
     "NO_BOOKING_TABLE", "NO_BOOKINGS", "EMPTY_STATUS", "CAPTURE_ERROR", "ERROR",
+    "CAPTCHA_FAILED",
 )
 
 
@@ -450,9 +567,19 @@ def _process_row(browser, email: str, password: str) -> tuple[str, str]:
         email_field.wait_for(state="visible")
         email_field.fill(email)
 
-        # 2. Human solves the CAPTCHA in the browser; we wait for the password
-        #    field to appear (the signal the CAPTCHA was accepted).
-        _wait_for_captcha_solved(page, email)
+        # 2. Solve the CAPTCHA -- automatically via OCR, or wait for a human.
+        if AUTO_CAPTCHA:
+            try:
+                solved = _auto_solve_captcha(page)
+            except Exception as e:  # noqa: BLE001 - OCR missing/broken -> human
+                logging.getLogger("bot").warning(
+                    "    auto-CAPTCHA unavailable (%s); waiting for a human.", e)
+                _wait_for_captcha_solved(page, email)
+                solved = True
+            if not solved:
+                return ("CAPTCHA_FAILED", "")
+        else:
+            _wait_for_captcha_solved(page, email)
 
         # 3. Password (appears after the CAPTCHA is accepted).
         pwd_field = page.locator(SEL_PASSWORD).first

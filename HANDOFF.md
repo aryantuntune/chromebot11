@@ -72,9 +72,11 @@ Put **two** Excel files in `input\`. The bot auto-detects which is which.
 .\.venv\Scripts\python.exe run_bot.py
 ```
 
-A browser window opens per account. **Solve the CAPTCHA** in it; the bot fills
-the password, logs in, opens the booking history, captures the OTP, and moves
-on. Stop any time (close the window or Ctrl+C) — progress is saved.
+A browser window opens per account. The bot **solves the CAPTCHA automatically**
+with OCR (`ddddocr`) — no typing needed — fills the password, logs in, opens the
+booking history, captures the OTP, and moves on. (Set `BOT_AUTO_CAPTCHA=0` to
+type CAPTCHAs yourself.) Stop any time (close the window or Ctrl+C) — progress is
+saved.
 
 ### Outputs (in `output\`, saved after every account)
 
@@ -111,9 +113,16 @@ $env:BOT_BROWSER="edge"; $env:BOT_SETTLE_MS="5000"; $env:BOT_BETWEEN_MS="4000"
 .\.venv\Scripts\python.exe run_bot.py
 ```
 
-Other controls: `BOT_MAX_ROWS=N` (process only the first N — good for a test
-run), `BOT_DEBUG=1` (save screenshots + page dumps to `output\debug\` for
-troubleshooting).
+CAPTCHA / browser controls: `BOT_AUTO_CAPTCHA=1` (default — OCR solves it; `0` =
+human types it), `BOT_HEADLESS=1` (no visible window, fine once CAPTCHA is
+automated), `BOT_CAPTCHA_TRIES=15`, `BOT_CAPTCHA_DATASET=1` (save confirmed
+CAPTCHAs to `output\captcha_dataset\` for future training). Other controls:
+`BOT_MAX_ROWS=N` (process only the first N — good for a test run), `BOT_DEBUG=1`
+(save screenshots + page dumps to `output\debug\`).
+
+**Auto-CAPTCHA needs `ddddocr`** (in `requirements.txt`). It self-collects a
+labelled training set (`output\captcha_dataset\`) and tracks accuracy in
+`output\captcha_stats.json`, so the solver can be fine-tuned over time.
 
 ---
 

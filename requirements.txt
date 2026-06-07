@@ -9,3 +9,7 @@
 playwright>=1.49
 openpyxl>=3.1
 PyYAML>=6.0
+
+# Automatic CAPTCHA solving (OCR). Pulls onnxruntime, opencv-python, Pillow.
+# Set BOT_AUTO_CAPTCHA=0 to fall back to manual (human) CAPTCHA solving.
+ddddocr>=1.6
