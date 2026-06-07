@@ -1,0 +1,11 @@
+# Python dependencies for the HP Gas sign-in bot.
+# Installed automatically by the setup scripts (setup.bat / setup.sh).
+#
+# Works on Windows, macOS, and Linux with Python 3.9+.
+# After installing these, the setup script also runs:
+#     python -m playwright install chrome
+# to register the Google Chrome browser Playwright drives.
+
+playwright>=1.49
+openpyxl>=3.1
+PyYAML>=6.0

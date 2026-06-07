@@ -1,0 +1,32 @@
+# Virtual environments
+venv/
+.venv/
+env/
+
+# Python caches
+__pycache__/
+*.pyc
+*.pyo
+
+# OS cruft
+.DS_Store
+
+# Generated Excel output (but keep the folder marker)
+output/*.xlsx
+!output/.gitkeep
+
+# User-provided Excel input (but keep the folder marker)
+input/*.xlsx
+!input/.gitkeep
+
+# Excel temp/lock files
+~$*.xlsx
+
+# Stray spreadsheets in the repo root (these may contain real credentials,
+# so never commit them).
+/*.xlsx
+/*.xls
+/*.csv
+
+# The raw Playwright recording (kept locally for reference only).
+recorded_flow.py

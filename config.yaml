@@ -1,0 +1,121 @@
+# =============================================================================
+# Configuration template for the Playwright sign-in / scrape bot.
+#
+# Copy/edit the PLACEHOLDER values below to match your target website. Every key
+# in this file is required by src/config.py (load_config) unless explicitly
+# marked optional. Selector values marked "CHANGE_ME: ..." MUST be replaced with
+# real CSS/Playwright selectors for your site.
+#
+# captcha_wait_mode (under timeouts) controls how the bot pauses for the CAPTCHA:
+#   "enter" -> The bot prints an instruction and BLOCKS until you solve the
+#              CAPTCHA in the visible (headed) browser and press Enter in the
+#              terminal. Best for sites where you must manually click/solve.
+#   "auto"  -> The bot does NOT block on the terminal. Instead it waits (polling
+#              up to a generous timeout) until the password field / post-login
+#              marker becomes available, then continues automatically. Use this
+#              only if the CAPTCHA resolves without an explicit terminal pause.
+#
+# NOTE: The browser runs HEADED by default (headless: false) so a human can see
+# and solve the CAPTCHA.
+# =============================================================================
+
+# Absolute URL of the site's landing/home page (opened first).
+site_url: "CHANGE_ME: https://example.com"
+
+# Absolute URL of the sign-in / login page.
+signin_url: "CHANGE_ME: https://example.com/signin"
+
+# Absolute URL of the sub-page that contains the results table. Used when
+# selectors.subpage_link is null; otherwise the bot clicks subpage_link instead.
+subpage_url: "CHANGE_ME: https://example.com/messages"
+
+# Run the browser headed (visible) so a human can solve the CAPTCHA.
+# Keep this false unless you have a specific reason to run headless.
+headless: false
+
+# Which browser to drive. "chrome" launches the locally-installed real Google
+# Chrome (recommended / requested). Other valid channels: "chrome-beta",
+# "msedge". Set to null to use Playwright's bundled Chromium instead.
+# Requires Chrome to be installed; otherwise run: python -m playwright install chrome
+browser_channel: "chrome"
+
+# -----------------------------------------------------------------------------
+# Selectors: how the bot finds elements on the page. These are CSS selectors
+# (or any selector Playwright accepts). Replace every CHANGE_ME placeholder.
+# -----------------------------------------------------------------------------
+selectors:
+  # Input where the email/username is typed on the sign-in page.
+  email_input: "CHANGE_ME: input[name='email']"
+
+  # Input where the password is typed (after the CAPTCHA is solved).
+  password_input: "CHANGE_ME: input[name='password']"
+
+  # The button/element clicked to submit the sign-in form.
+  signin_button: "CHANGE_ME: button[type='submit']"
+
+  # A selector that appears ONLY after a successful login (used to confirm
+  # sign-in succeeded). E.g. a dashboard header or a logout link.
+  post_login_marker: "CHANGE_ME: nav.user-menu"
+
+  # OPTIONAL: a selector clicked to navigate to the sub-page with the table.
+  # Set to null to navigate directly using subpage_url instead.
+  subpage_link: null
+
+  # The results table on the sub-page.
+  table: "CHANGE_ME: table.messages"
+
+  # The FIRST/TOP data row within the table (excluding header rows).
+  # E.g. "tbody tr:first-child".
+  message_row: "CHANGE_ME: tbody tr:first-child"
+
+  # The message cell WITHIN that row (relative to message_row).
+  # E.g. "td.message" or "td:nth-child(3)".
+  message_cell: "CHANGE_ME: td.message"
+
+  # OPTIONAL: a sign-out button clicked between rows (best-effort).
+  # Set to null to skip explicit sign-out (each row already uses a fresh
+  # browser context, so sign-out is not strictly required).
+  signout_button: null
+
+# -----------------------------------------------------------------------------
+# Excel: input/output locations and how to read/write the workbook.
+# -----------------------------------------------------------------------------
+excel:
+  # Directory scanned for the input .xlsx (most recently modified is used).
+  input_dir: "input"
+
+  # Directory where the result workbook copy is written (created if missing).
+  output_dir: "output"
+
+  # Worksheet name to use; null = the active sheet.
+  sheet_name: null
+
+  # 1-based worksheet row that holds the headers; 0 means there is no header.
+  header_row: 1
+
+  # 1-based worksheet row where data starts.
+  first_data_row: 2
+
+  # Column letter holding the email/username.
+  email_col: "A"
+
+  # Column letter holding the password.
+  password_col: "B"
+
+  # Column letter where the scraped message is written.
+  result_col: "C"
+
+# -----------------------------------------------------------------------------
+# Timeouts: navigation/element waits and the CAPTCHA-handling strategy.
+# (See the top-of-file comment for captcha_wait_mode details.)
+# -----------------------------------------------------------------------------
+timeouts:
+  # Max time (ms) for page navigations.
+  navigation_ms: 30000
+
+  # Max time (ms) for individual element waits.
+  element_ms: 15000
+
+  # "enter" -> pause and wait for Enter in the terminal after you solve CAPTCHA.
+  # "auto"  -> wait automatically for the password field / post-login marker.
+  captcha_wait_mode: "enter"
