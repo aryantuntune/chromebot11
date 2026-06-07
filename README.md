@@ -111,6 +111,13 @@ $env:BOT_BROWSER = "edge"     # chrome (default) | edge | brave | opera
 | `BOT_BROWSER` | `chrome` (default), `edge`, `brave`, or `opera` |
 | `BOT_MAX_ROWS` | Process only the first N targets (handy for a test run) |
 | `BOT_DEBUG` | Save a screenshot + page text/HTML per account to `output/debug/` |
+| `BOT_SETTLE_MS` | Pause (ms) after login before opening the booking page (default `3000`). The portal needs a moment to set up the session before the heavy booking grid will render — **raise this (e.g. `5000`) if the booking page often fails to load.** |
+| `BOT_BETWEEN_MS` | Pause (ms) between accounts (default `3000`) so logins don't hammer the portal back-to-back. |
+
+> **Tip — slow down to load more reliably.** The portal throttles rapid
+> automated traffic and is slow to render the booking page right after a fast
+> login. Pacing the bot like a human (the `BOT_SETTLE_MS` / `BOT_BETWEEN_MS`
+> pauses) dramatically cuts booking-page load failures.
 
 Example test run of the first 3 accounts with debug dumps:
 

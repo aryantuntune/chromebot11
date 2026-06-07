@@ -101,6 +101,13 @@ OTP_RESULTS_NAME = "OTP_results.xlsx"   # separate output: Consumer ID | OTP
 MAX_ROWS = int(os.environ["BOT_MAX_ROWS"]) if os.environ.get("BOT_MAX_ROWS") else None
 DEBUG_DUMP = os.environ.get("BOT_DEBUG", "").strip() not in ("", "0", "false", "no")
 
+# Human-like pacing (milliseconds). The portal can choke on rapid automated
+# steps and needs a moment AFTER login to finish setting up the session before
+# the heavy booking-history page will render. These pauses mimic a person's
+# pace and cut down on the booking grid failing to load. Tune via env vars.
+SETTLE_MS = int(os.environ.get("BOT_SETTLE_MS", "3000"))    # after login, before opening booking
+BETWEEN_MS = int(os.environ.get("BOT_BETWEEN_MS", "3000"))  # pause between accounts
+
 
 def _setup_logging() -> None:
     logging.basicConfig(
@@ -385,36 +392,45 @@ def _launch_browser(pw):
     return pw.chromium.launch(headless=HEADLESS, channel="chrome")
 
 
-def _open_booking_history(page) -> bool:
-    """Navigate to the booking-history grid, retrying because the page is flaky.
+def _dismiss_ok(page, timeout: int = 4_000) -> None:
+    """Best-effort: dismiss the post-login 'OK' confirmation modal if present."""
+    try:
+        ok = page.get_by_role("button", name="OK").first
+        ok.wait_for(state="visible", timeout=timeout)
+        ok.click()
+    except Exception:  # noqa: BLE001 - best-effort
+        pass
 
-    On each attempt we (re)click the menu link if it's visible, then wait for
-    the grid. If it doesn't appear we reload and try again. Re-clicking/reloading
-    fixes most blank loads WITHOUT needing a fresh login or CAPTCHA. Returns True
-    if the grid became visible.
+
+def _open_booking_history(page) -> bool:
+    """Navigate to the booking grid, re-clicking the menu link if it's slow.
+
+    We deliberately DO NOT reload the page. Reloading this ASP.NET portal
+    resubmits the console form and re-pops the post-login 'OK' modal, which
+    strands the run on the customer console. Instead, on each attempt we dismiss
+    any stray OK modal and re-click the left-nav "View Cylinder Booking history"
+    link -- a clean forward navigation. Returns True if the grid becomes visible.
     """
-    for attempt in range(1, 4):
+    for attempt in range(1, 3):
+        _dismiss_ok(page, timeout=2_000)
         try:
             link = page.get_by_role(
                 "link", name="View Cylinder Booking history"
             ).first
-            if link.is_visible():
-                link.click()
+            link.wait_for(state="visible", timeout=15_000)
+            link.click()
         except Exception:  # noqa: BLE001 - best-effort
             pass
         try:
             page.locator(SEL_BOOKING_TABLE).first.wait_for(
-                state="visible", timeout=45_000
+                state="visible", timeout=60_000
             )
             return True
         except PlaywrightTimeoutError:
             logging.getLogger("bot").info(
-                "  booking grid not ready (attempt %d/3) -> reloading...", attempt
+                "  booking grid not ready (attempt %d/2) -> re-clicking menu...",
+                attempt,
             )
-            try:
-                page.reload(wait_until="domcontentloaded")
-            except Exception:  # noqa: BLE001 - best-effort
-                pass
     return False
 
 
@@ -446,16 +462,17 @@ def _process_row(browser, email: str, password: str) -> tuple[str, str]:
         # 4. Submit.
         page.locator(SEL_LOGIN_BTN).first.click()
 
-        # 5. Best-effort: dismiss an "OK" confirmation modal if one appears.
-        try:
-            ok = page.get_by_role("button", name="OK")
-            ok.wait_for(state="visible", timeout=5_000)
-            ok.click()
-        except PlaywrightTimeoutError:
-            pass
+        # 5. Best-effort: dismiss the post-login "OK" confirmation modal.
+        _dismiss_ok(page, timeout=5_000)
 
-        # 6. Open the booking-history grid, retrying/reloading if the flaky
-        #    page comes up blank (no new CAPTCHA needed -- we stay logged in).
+        # Let the server finish setting up the session before we request the
+        # heavy booking-history page. This human-like pause is the main defence
+        # against the booking grid failing to load right after a fast login.
+        if SETTLE_MS > 0:
+            time.sleep(SETTLE_MS / 1000.0)
+
+        # 6. Open the booking-history grid, re-clicking the menu link if the
+        #    flaky page is slow (no reload -> never bounces back to the console).
         _open_booking_history(page)
 
         if DEBUG_DUMP:
@@ -546,6 +563,10 @@ def main() -> int:
                     log.info("[%d/%d] Consumer %s -> already have %r, skipping.",
                              i, total, cid, _txt(prev))
                     continue
+
+                # Space out logins so we don't hammer the portal back-to-back.
+                if processed > 0 and BETWEEN_MS > 0:
+                    time.sleep(BETWEEN_MS / 1000.0)
 
                 log.info("[%d/%d] Consumer %s -> signing in as %s",
                          i, total, cid, rec["email"])
