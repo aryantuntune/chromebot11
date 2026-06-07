@@ -9,9 +9,10 @@ in the repo), and the operational settings that make it reliable.
 ## 1. What the bot does
 
 For each consumer ID in a **targets** list, it looks up that account's login in a
-**master** credentials file, logs into the My HPGas portal (you solve the
-CAPTCHA), opens **View Cylinder Booking history**, and reads the latest
-booking's **delivery OTP**. It writes the OTP to two output files, saving after
+**master** credentials file, logs into the My HPGas portal (**auto-solving the
+CAPTCHA with OCR — no human needed**), opens **View Cylinder Booking history**,
+and reads the latest booking's **delivery OTP** (shown on the page as
+`OutForDelivery (OTP: 7149)`). It writes the OTP to output files, saving after
 every account.
 
 ---
@@ -80,9 +81,14 @@ saved.
 
 ### Outputs (in `output\`, saved after every account)
 
-- **`OTP_results.xlsx`** — two columns: **Consumer ID | OTP**.
+- **`OTP_results.xlsx`** — the working log: every ID + its result (OTPs **and**
+  failures). Drives resume/retry.
 - **`<master-name>.result.xlsx`** — a full copy of the master with the **OTP in a
   new last column** on each matched row.
+- **Clean 3-column OTP file** (on request): filter `OTP_results.xlsx` to rows
+  whose value is 3–8 digits and write `Consumer ID`, the literal word `otp`, and
+  the OTP into columns A / B / C (e.g. `660114 | otp | 7149`). Save as
+  `output\Captured_OTPs.xlsx`.
 
 ### What the OTP column contains
 
@@ -105,11 +111,11 @@ with these:**
 | Env var | Recommended | Meaning |
 |---------|-------------|---------|
 | `BOT_SETTLE_MS` | `5000` | pause after login before opening the booking page |
-| `BOT_BETWEEN_MS` | `4000` | pause between accounts |
+| `BOT_BETWEEN_MS` | `6000` | pause between accounts (auto-CAPTCHA removes the human pause, so keep this generous) |
 | `BOT_BROWSER` | `edge` | `chrome` (default), `edge`, `brave`, or `opera` — all work |
 
 ```powershell
-$env:BOT_BROWSER="edge"; $env:BOT_SETTLE_MS="5000"; $env:BOT_BETWEEN_MS="4000"
+$env:BOT_BROWSER="edge"; $env:BOT_SETTLE_MS="5000"; $env:BOT_BETWEEN_MS="6000"
 .\.venv\Scripts\python.exe run_bot.py
 ```
 
@@ -120,9 +126,22 @@ CAPTCHAs to `output\captcha_dataset\` for future training). Other controls:
 `BOT_MAX_ROWS=N` (process only the first N — good for a test run), `BOT_DEBUG=1`
 (save screenshots + page dumps to `output\debug\`).
 
-**Auto-CAPTCHA needs `ddddocr`** (in `requirements.txt`). It self-collects a
-labelled training set (`output\captcha_dataset\`) and tracks accuracy in
-`output\captcha_stats.json`, so the solver can be fine-tuned over time.
+---
+
+## 6b. How the auto-CAPTCHA works (already built)
+
+The login CAPTCHA is a simple **6-char lowercase-alphanumeric image**. The bot
+solves it with **`ddddocr`** (~83% first-try; ~20–50ms): screenshot the CAPTCHA
+→ OCR → if it's 6 chars, type it + Enter → **the password field appearing = a
+correct CAPTCHA**. A wrong guess keeps the same image, so the bot clicks the
+**refresh** button for a fresh one and retries — the site allows **unlimited
+tries**, so it effectively always succeeds within a few attempts.
+
+Every **confirmed-correct** `(image, text)` pair is auto-saved to
+`output\captcha_dataset\` (filename = the correct text), and rolling accuracy is
+written to `output\captcha_stats.json`. This builds a free, accurately-labelled
+dataset so the solver can be **fine-tuned over time** for higher first-try
+accuracy (fewer retries).
 
 ---
 
@@ -146,6 +165,11 @@ After many rapid logins (~70+) the portal can start failing most requests
 or raise the delays. This is the **server**, not the bot — switching browsers
 won't help (all load the site equally fast).
 
+**Booking page under maintenance.** If *almost every* account returns
+`NO_BOOKING_TABLE` even though the CAPTCHA + login succeed, the portal's "View
+Cylinder Booking history" page is likely **down for maintenance**. Wait and
+resume later — the captured OTPs are saved and resume retries the rest.
+
 ---
 
 ## 9. Fixes already baked into the code
@@ -157,3 +181,14 @@ won't help (all load the site equally fast).
 - **OTP location.** The OTP is not in the "Status" column (which may say "In
   process"); it's in the delivery cell further right, formatted
   `OutForDelivery (OTP: NNNN)`. The bot reads that cell and extracts the digits.
+
+---
+
+## 10. Scaling across multiple devices
+
+Running many bots from **one IP** makes the portal's throttling worse, so don't
+stack bots on a single machine. To go faster, split the consumer-ID list across
+**several devices** (each its own IP): give each device the **same master** file
+plus its **own targets** file (a slice of the IDs). They run independently and
+you **merge the OTP outputs** at the end. This `HANDOFF.md` + the repo are all a
+new device needs to join in.
