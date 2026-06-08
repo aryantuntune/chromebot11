@@ -145,6 +145,26 @@ CAPTCHAs to `output\captcha_dataset\` for future training). Other controls:
 `BOT_MAX_ROWS=N` (process only the first N — good for a test run), `BOT_DEBUG=1`
 (save screenshots + page dumps to `output\debug\`).
 
+### Adaptive pacing & auto-retry (on by default — the bot self-manages)
+
+- **Adaptive pacing** (`BOT_ADAPTIVE=1`): the gap between logins automatically
+  **grows after booking-page failures** (the throttle signature), **shrinks
+  after clean successes**, and a sustained failure streak triggers an automatic
+  **cooldown** (`BOT_COOLDOWN_FAILS=5`, `BOT_COOLDOWN_MS=120000`) so the portal
+  can recover. Bounded by `BOT_MIN_BETWEEN_MS=3000` / `BOT_MAX_BETWEEN_MS=30000`.
+  Set `BOT_ADAPTIVE=0` to use a fixed `BOT_BETWEEN_MS` instead.
+- **Auto-retry** (`BOT_AUTO_RETRY=1`): after a full pass the bot keeps
+  **re-passing — retrying only the failures** — until everything's captured or a
+  pass makes no progress, up to `BOT_MAX_PASSES=4`. Browser + OCR stay warm
+  across passes. This makes a single `run.bat` truly fire-and-forget.
+
+### Fine-tuning the CAPTCHA solver (optional)
+
+Run `python train_captcha.py` to inspect the auto-collected dataset
+(`output\captcha_dataset\`) and get the recipe to train a custom model. Drop the
+result into `output\captcha_model\` (`model.onnx` + `charsets.json`) and the bot
+auto-uses it. Not needed in practice — the bundled model is ~100% with retries.
+
 ---
 
 ## 6b. How the auto-CAPTCHA works (already built)

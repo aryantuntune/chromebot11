@@ -1,0 +1,40 @@
+==============================================================
+  HP Gas OTP Bot — START HERE  (no coding, no AI needed)
+==============================================================
+
+The bot is already built. You just run it. 5 steps:
+
+1. INSTALL PYTHON
+   - Get Python 3.9+ from https://python.org/downloads
+   - During install, TICK the box "Add Python to PATH".
+   - Make sure Google Chrome (or Microsoft Edge) is installed.
+
+2. GET THIS FOLDER
+   - You already have it if you're reading this. Otherwise download it
+     from https://github.com/aryantuntune/chromebot11
+     (green "Code" button -> "Download ZIP"), then unzip.
+
+3. RUN setup.bat  (double-click it)
+   - Installs everything automatically, including the CAPTCHA solver.
+   - Do this ONCE. Wait for "Setup complete!".
+
+4. ADD YOUR TWO EXCEL FILES to the "input" folder
+   - MASTER file: your big credentials list (many columns; column A =
+     consumer number, C = email/login id, E = password).
+   - TARGETS file: a single column of the consumer IDs you want OTPs for.
+
+5. RUN run.bat  (double-click it)
+   - It runs hands-free: solves the CAPTCHA, logs in, reads each OTP,
+     paces itself around the website's slowdowns, and retries failures.
+   - You can stop anytime (close the window). Running it again RESUMES.
+
+--------------------------------------------------------------
+RESULTS  (in the "output" folder):
+  - Captured_OTPs.xlsx   ->  clean list:  Consumer ID | otp | value
+  - OTP_results.xlsx     ->  full log (includes any that need a retry)
+
+TIPS:
+  - If lots of accounts fail at once, the website is just busy/slow.
+    Wait a while and run run.bat again — it retries only the failures.
+  - Full details and settings are in HANDOFF.md.
+==============================================================
