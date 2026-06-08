@@ -153,6 +153,11 @@ MAX_PASSES = int(os.environ.get("BOT_MAX_PASSES", "4"))
 # inclusive spreadsheet row range so you can resume / cap a partially-done file.
 START_ROW = int(os.environ.get("BOT_START_ROW", "0"))
 END_ROW = int(os.environ.get("BOT_END_ROW", "0"))
+# Force a specific self-contained file (used by the overnight orchestrator).
+FILE_OVERRIDE = os.environ.get("BOT_FILE", "").strip()
+# Overnight resilience: on a pass that captures nothing, cool down and retry
+# instead of stopping; only give up after this many consecutive dry passes.
+DRY_STOP = int(os.environ.get("BOT_DRY_STOP", "3"))
 
 
 def _setup_logging() -> None:
@@ -477,33 +482,49 @@ def _load_targets(path) -> list[str]:
     return ids
 
 
-def _detect_self_contained(input_dir: str):
-    """Return (path, colmap) for the newest input workbook that carries its own
-    credentials -- a header row with email + password columns -- else None.
+def _colmap_for(path):
+    """If a workbook's header row has email + password columns, return a colmap
+    {id, email, pwd, out} of 1-based column indices; else None."""
+    try:
+        wb = load_workbook(path, read_only=True)
+        header = next(wb.active.iter_rows(min_row=1, max_row=1, values_only=True), ())
+        wb.close()
+    except Exception:  # noqa: BLE001
+        return None
+    hdr = [_txt(h).lower() for h in header]
+    email_i = next((i for i, h in enumerate(hdr, 1) if "email" in h), None)
+    pwd_i = next((i for i, h in enumerate(hdr, 1) if h in ("pwd", "password", "pass")), None)
+    if not (email_i and pwd_i):
+        return None
+    id_i = next((i for i, h in enumerate(hdr, 1)
+                 if "consumer" in h or h in ("conno", "id", "consumerno")), 1)
+    out_i = next((i for i, h in enumerate(hdr, 1) if "otp" in h or "out" in h), None)
+    return {"id": id_i, "email": email_i, "pwd": pwd_i, "out": out_i}
 
-    colmap maps id/email/pwd/out to 1-based column indices.
+
+def _detect_self_contained(input_dir: str):
+    """Return (path, colmap) for the self-contained workbook to process.
+
+    If BOT_FILE is set, that exact file is used; otherwise the newest input
+    workbook whose header carries email + password columns. Returns None if no
+    such file exists (then the master/targets mode is used).
     """
+    if FILE_OVERRIDE:
+        p = pathlib.Path(FILE_OVERRIDE)
+        if not p.is_absolute():
+            p = pathlib.Path(input_dir) / FILE_OVERRIDE
+        cm = _colmap_for(p) if p.exists() else None
+        if cm:
+            return (p, cm)
     best = None
     for p in pathlib.Path(input_dir).glob("*.xlsx"):
         if not p.is_file() or p.name.startswith("~$"):
             continue
-        try:
-            wb = load_workbook(p, read_only=True)
-            header = next(wb.active.iter_rows(min_row=1, max_row=1, values_only=True), ())
-            wb.close()
-        except Exception:  # noqa: BLE001
+        cm = _colmap_for(p)
+        if not cm:
             continue
-        hdr = [_txt(h).lower() for h in header]
-        email_i = next((i for i, h in enumerate(hdr, 1) if "email" in h), None)
-        pwd_i = next((i for i, h in enumerate(hdr, 1) if h in ("pwd", "password", "pass")), None)
-        if not (email_i and pwd_i):
-            continue
-        id_i = next((i for i, h in enumerate(hdr, 1)
-                     if "consumer" in h or h in ("conno", "id", "consumerno")), 1)
-        out_i = next((i for i, h in enumerate(hdr, 1) if "otp" in h or "out" in h), None)
-        colmap = {"id": id_i, "email": email_i, "pwd": pwd_i, "out": out_i}
         if best is None or p.stat().st_mtime > best[0].stat().st_mtime:
-            best = (p, colmap)
+            best = (p, cm)
     return best
 
 
@@ -912,6 +933,7 @@ def main() -> int:
 
     max_passes = MAX_PASSES if AUTO_RETRY else 1
     interrupted = False
+    dry_passes = 0
     with sync_playwright() as pw:
         browser = _launch_browser(pw)
         try:
@@ -978,8 +1000,22 @@ def main() -> int:
                 if interrupted or rem == 0 or not AUTO_RETRY:
                     break
                 if pass_ok == 0:
-                    log.warning("No progress this pass -> stopping retries (%d still failing).", rem)
-                    break
+                    # No progress -- likely the portal is throttled/down. Cool
+                    # down to let it recover and try again; give up only after
+                    # DRY_STOP dry passes in a row.
+                    dry_passes += 1
+                    if dry_passes >= DRY_STOP:
+                        log.warning("No progress for %d passes -> stopping (%d still failing). "
+                                    "Re-run later to retry them.", dry_passes, rem)
+                        break
+                    log.warning("No progress (dry pass %d/%d) -> cooling down %.0fs to let the "
+                                "portal recover, then retrying...", dry_passes, DRY_STOP,
+                                COOLDOWN_MS / 1000.0)
+                    if COOLDOWN_MS > 0:
+                        time.sleep(COOLDOWN_MS / 1000.0)
+                    pacer.between = float(BETWEEN_MS)  # reset the pace after a cooldown
+                    continue
+                dry_passes = 0
                 breather = min(COOLDOWN_MS, 60_000) / 1000.0
                 if breather > 0:
                     log.info("Retry pass next; pausing %.0fs first.", breather)
