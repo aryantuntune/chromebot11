@@ -332,21 +332,25 @@ def _capture_result(page) -> tuple[str, str]:
     """
     try:
         table = page.locator(SEL_BOOKING_TABLE).first
+        row = table.locator(BOOKING_ROW).first
         try:
-            table.wait_for(state="visible", timeout=BOOKING_NAV_TIMEOUT_MS)
+            # Wait for the newest booking ROW to be ATTACHED (not "visible"): the
+            # gridviewScroll plugin can wrap/hide the <table>, so requiring
+            # "visible" times out even when the OTP is on screen. Shorter timeout
+            # here since _open_booking_history already waited for the row.
+            row.wait_for(state="attached", timeout=20_000)
         except PlaywrightTimeoutError:
             return ("NO_BOOKING_TABLE", "")
 
-        row = table.locator(BOOKING_ROW).first
-        if row.count() == 0:
-            return ("NO_BOOKINGS", "")
         cells = row.locator("td")
         n = cells.count()
 
         def _cell(i: int) -> str:
             if i >= n:
                 return ""
-            text = (cells.nth(i).inner_text(timeout=5_000) or "").strip()
+            # text_content reads the text even if the element is plugin-hidden
+            # (inner_text returns "" for display:none).
+            text = (cells.nth(i).text_content(timeout=5_000) or "").strip()
             return " ".join(text.split())  # collapse whitespace/newlines
 
         status = _cell(STATUS_COL_IDX)
@@ -539,8 +543,12 @@ def _open_booking_history(page) -> bool:
         except Exception:  # noqa: BLE001 - best-effort
             pass
         try:
-            page.locator(SEL_BOOKING_TABLE).first.wait_for(
-                state="visible", timeout=60_000
+            # Wait for a booking data ROW to be ATTACHED (present in the DOM),
+            # not "visible": the gridviewScroll plugin wraps/hides the original
+            # <table>, so the OTP can be on screen while the element reports
+            # not-visible. "attached" detects the data either way.
+            page.locator(f"{SEL_BOOKING_TABLE} {BOOKING_ROW}").first.wait_for(
+                state="attached", timeout=45_000
             )
             return True
         except PlaywrightTimeoutError:
@@ -613,6 +621,21 @@ def _process_row(browser, email: str, password: str) -> tuple[str, str]:
             pass
 
 
+def _safe_save(wb, path) -> bool:
+    """Save a workbook, but never crash the run if the file is locked/open.
+
+    If the target is open in Excel (a Windows lock), we log a warning and keep
+    going -- progress is not lost, the file just isn't updated until it's closed.
+    """
+    try:
+        wb.save(str(path))
+        return True
+    except (PermissionError, OSError) as e:
+        logging.getLogger("bot").warning(
+            "    could not save %s (is it open in Excel?): %s", path, e)
+        return False
+
+
 def main() -> int:
     _setup_logging()
     log = logging.getLogger("bot")
@@ -678,7 +701,7 @@ def main() -> int:
                     log.warning("[%d/%d] Consumer %s: not found in master / no email -> skipped.",
                                 i, total, cid)
                     _record(cid, "NOT_IN_MASTER")
-                    res_wb.save(str(otp_out))
+                    _safe_save(res_wb, otp_out)
                     continue
 
                 # Already captured in a previous run? Mirror it into the master
@@ -714,9 +737,9 @@ def main() -> int:
 
                 # The small OTP file is saved every account (never lose an OTP);
                 # the big master is saved every 10 accounts and again at the end.
-                res_wb.save(str(otp_out))
+                _safe_save(res_wb, otp_out)
                 if processed % 10 == 0:
-                    master_wb.save(str(master_out))
+                    _safe_save(master_wb, master_out)
                     log.info("Saved master progress (%d processed).", processed)
         finally:
             try:
@@ -724,8 +747,8 @@ def main() -> int:
             except Exception:  # noqa: BLE001
                 pass
 
-    res_wb.save(str(otp_out))
-    master_wb.save(str(master_out))
+    _safe_save(res_wb, otp_out)
+    _safe_save(master_wb, master_out)
     log.info("Done. %d processed, %d already-had, %d total target(s).",
              processed, skipped, total)
     log.info("OTP list  -> %s", otp_out)
