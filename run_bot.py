@@ -133,6 +133,21 @@ SHARD_COUNT = max(1, int(os.environ.get("BOT_SHARD_COUNT", "1")))
 OUT_SUFFIX = os.environ.get("BOT_OUT_SUFFIX", "")
 MASTER_INDEX = os.environ.get("BOT_MASTER_INDEX", "").strip()
 
+# Adaptive pacing: automatically ride the portal's throttle. The delay between
+# logins GROWS after booking-page failures (likely throttling) and SHRINKS after
+# a run of clean successes; a sustained failure streak triggers a cooldown so
+# the server can recover. Set BOT_ADAPTIVE=0 for a fixed BOT_BETWEEN_MS instead.
+ADAPTIVE = os.environ.get("BOT_ADAPTIVE", "1").strip().lower() not in ("0", "false", "no")
+MIN_BETWEEN_MS = int(os.environ.get("BOT_MIN_BETWEEN_MS", "3000"))
+MAX_BETWEEN_MS = int(os.environ.get("BOT_MAX_BETWEEN_MS", "30000"))
+COOLDOWN_FAILS = int(os.environ.get("BOT_COOLDOWN_FAILS", "5"))    # consecutive fails -> cooldown
+COOLDOWN_MS = int(os.environ.get("BOT_COOLDOWN_MS", "120000"))     # cooldown length (ms)
+
+# Auto-retry: after a full pass, keep re-passing (skip captured, retry failures)
+# until everything's captured or a pass makes no progress, up to BOT_MAX_PASSES.
+AUTO_RETRY = os.environ.get("BOT_AUTO_RETRY", "1").strip().lower() not in ("0", "false", "no")
+MAX_PASSES = int(os.environ.get("BOT_MAX_PASSES", "4"))
+
 
 def _setup_logging() -> None:
     logging.basicConfig(
@@ -194,7 +209,17 @@ def _get_ocr():
     global _OCR
     if _OCR is None:
         import ddddocr
-        _OCR = ddddocr.DdddOcr(show_ad=False)
+        # Use a locally fine-tuned model + charset if train_captcha.py has
+        # produced one; otherwise the bundled model. Output is post-filtered to
+        # [a-z0-9] either way (this portal's CAPTCHA alphabet).
+        model = pathlib.Path(OUTPUT_DIR) / "captcha_model"
+        onnx, charsets = model / "model.onnx", model / "charsets.json"
+        if onnx.exists() and charsets.exists():
+            _OCR = ddddocr.DdddOcr(show_ad=False, import_onnx_path=str(onnx),
+                                   charsets_path=str(charsets))
+            logging.getLogger("bot").info("CAPTCHA: using fine-tuned model %s", onnx)
+        else:
+            _OCR = ddddocr.DdddOcr(show_ad=False)
     return _OCR
 
 
@@ -646,6 +671,65 @@ def _safe_save(wb, path) -> bool:
         return False
 
 
+class _Pacer:
+    """Adaptive inter-login delay that rides the portal's per-IP throttle.
+
+    Strategy (a throttle-aware AIMD):
+      * a booking-page **failure** (NO_BOOKING_TABLE / ERROR -- the throttle
+        signature) multiplies the gap by 1.6 (back off fast);
+      * every few **clean successes** shave 1s off the gap (probe faster);
+      * a sustained failure **streak** triggers a one-off cooldown sleep so the
+        server can recover, then resumes at a calmer rate.
+
+    All bounded by BOT_MIN_BETWEEN_MS .. BOT_MAX_BETWEEN_MS. With BOT_ADAPTIVE=0
+    it just sleeps a fixed BOT_BETWEEN_MS.
+    """
+
+    def __init__(self):
+        self.between = float(BETWEEN_MS)
+        self.fail_streak = 0
+        self.ok_streak = 0
+        self._log = logging.getLogger("bot")
+
+    def wait(self, first: bool) -> None:
+        """Sleep the current gap before a login (nothing before the very first)."""
+        if first:
+            return
+        gap = self.between if ADAPTIVE else float(BETWEEN_MS)
+        if gap > 0:
+            time.sleep(gap / 1000.0)
+
+    def record(self, ok: bool) -> None:
+        """Update the gap from the latest booking-page outcome."""
+        if not ADAPTIVE:
+            return
+        if ok:
+            self.fail_streak = 0
+            self.ok_streak += 1
+            if self.ok_streak >= 3 and self.between > MIN_BETWEEN_MS:
+                self.between = max(MIN_BETWEEN_MS, self.between - 1000)
+                self.ok_streak = 0
+                self._log.info("    [pacing] healthy -> gap %.1fs", self.between / 1000.0)
+        else:
+            self.ok_streak = 0
+            self.fail_streak += 1
+            new = min(MAX_BETWEEN_MS, self.between * 1.6)
+            if new != self.between:
+                self.between = new
+                self._log.info("    [pacing] throttle? backing off -> gap %.1fs",
+                               self.between / 1000.0)
+
+    def maybe_cooldown(self) -> None:
+        """If failures are piling up, pause to let the portal's throttle reset."""
+        if ADAPTIVE and self.fail_streak >= COOLDOWN_FAILS and COOLDOWN_MS > 0:
+            self._log.warning(
+                "    [pacing] %d failures in a row -> cooling down %.0fs to let "
+                "the portal recover...", self.fail_streak, COOLDOWN_MS / 1000.0)
+            time.sleep(COOLDOWN_MS / 1000.0)
+            self.fail_streak = 0
+            self.between = min(MAX_BETWEEN_MS, max(self.between, float(BETWEEN_MS)))
+
+
 def _write_captured_otps(res_ws, out_dir: str) -> int:
     """Write the clean 3-column Captured_OTPs.xlsx (Consumer ID | otp | value)."""
     cap = Workbook()
@@ -733,60 +817,97 @@ def main() -> int:
             res_ws.append([cid, otp])
             res_rows[cid] = res_ws.max_row
 
-    processed = 0
+    processed = 0   # accounts actually processed across all passes
     skipped = 0
     total = len(target_ids)
+    pacer = _Pacer()
+
+    def _remaining() -> int:
+        """How many target accounts still need work (failed or not yet done)."""
+        c = 0
+        for cid in target_ids:
+            rec = info.get(cid)
+            if rec is None or not rec.get("email"):
+                continue  # NOT_IN_MASTER -- not retryable
+            prev = res_ws.cell(row=res_rows[cid], column=2).value if cid in res_rows else None
+            if prev is None or _needs_retry(prev):
+                c += 1
+        return c
+
+    max_passes = MAX_PASSES if AUTO_RETRY else 1
+    interrupted = False
     with sync_playwright() as pw:
         browser = _launch_browser(pw)
         try:
-            for i, cid in enumerate(target_ids, 1):
-                rec = info.get(cid)
-                if rec is None or not rec["email"]:
-                    log.warning("[%d/%d] Consumer %s: not found in master / no email -> skipped.",
-                                i, total, cid)
-                    _record(cid, "NOT_IN_MASTER")
-                    _safe_save(res_wb, otp_out)
-                    continue
+            for pass_no in range(1, max_passes + 1):
+                pass_done = 0   # processed this pass
+                pass_ok = 0     # newly captured this pass
+                log.info("==== Pass %d/%d -- %d account(s) still to do ====",
+                         pass_no, max_passes, _remaining())
+                for i, cid in enumerate(target_ids, 1):
+                    rec = info.get(cid)
+                    if rec is None or not rec.get("email"):
+                        if pass_no == 1:
+                            log.warning("[%d/%d] Consumer %s: not in master / no email -> skipped.",
+                                        i, total, cid)
+                            _record(cid, "NOT_IN_MASTER")
+                            _safe_save(res_wb, otp_out)
+                        continue
 
-                # Already captured in a previous run? Mirror it into the master
-                # (so master_out stays complete) and skip the browser/CAPTCHA.
-                prev = res_ws.cell(row=res_rows[cid], column=2).value if cid in res_rows else None
-                if prev is not None and not _needs_retry(prev):
+                    prev = res_ws.cell(row=res_rows[cid], column=2).value if cid in res_rows else None
+                    if prev is not None and not _needs_retry(prev):
+                        if master_ws is not None:
+                            master_ws.cell(row=rec["row"], column=otp_col_idx, value=prev)
+                        if pass_no == 1:
+                            skipped += 1
+                        continue
+
+                    # Adaptive delay before each login (none before the very first).
+                    pacer.wait(first=(processed == 0))
+
+                    log.info("[p%d %d/%d] Consumer %s -> signing in as %s",
+                             pass_no, i, total, cid, rec["email"])
+                    try:
+                        otp, order_ref = _process_row(browser, rec["email"], rec["password"])
+                    except KeyboardInterrupt:
+                        log.warning("Interrupted by user. Saving progress and exiting.")
+                        interrupted = True
+                        break
+                    except Exception as ex:  # noqa: BLE001 - keep going on the next account
+                        log.exception("Consumer %s failed: %s", cid, ex)
+                        otp, order_ref = (f"ERROR: {ex}", "")
+
                     if master_ws is not None:
-                        master_ws.cell(row=rec["row"], column=otp_col_idx, value=prev)
-                    skipped += 1
-                    log.info("[%d/%d] Consumer %s -> already have %r, skipping.",
-                             i, total, cid, _txt(prev))
-                    continue
+                        master_ws.cell(row=rec["row"], column=otp_col_idx, value=otp)
+                    _record(cid, otp)
+                    processed += 1
+                    pass_done += 1
 
-                # Space out logins so we don't hammer the portal back-to-back.
-                if processed > 0 and BETWEEN_MS > 0:
-                    time.sleep(BETWEEN_MS / 1000.0)
+                    ok = not _needs_retry(otp)
+                    if ok:
+                        pass_ok += 1
+                    pacer.record(ok)
+                    log.info("[p%d %d/%d] Consumer %s -> OTP=%r  (gap %.1fs)",
+                             pass_no, i, total, cid, otp, pacer.between / 1000.0)
 
-                log.info("[%d/%d] Consumer %s -> signing in as %s",
-                         i, total, cid, rec["email"])
-                try:
-                    otp, order_ref = _process_row(browser, rec["email"], rec["password"])
-                except KeyboardInterrupt:
-                    log.warning("Interrupted by user. Saving progress and exiting.")
+                    _safe_save(res_wb, otp_out)
+                    if master_ws is not None and processed % 10 == 0:
+                        _safe_save(master_wb, master_out)
+                    if not ok:
+                        pacer.maybe_cooldown()
+
+                rem = _remaining()
+                log.info("==== Pass %d done: %d processed, %d captured, %d still failing ====",
+                         pass_no, pass_done, pass_ok, rem)
+                if interrupted or rem == 0 or not AUTO_RETRY:
                     break
-                except Exception as ex:  # noqa: BLE001 - keep going on the next account
-                    log.exception("Consumer %s failed: %s", cid, ex)
-                    otp, order_ref = (f"ERROR: {ex}", "")
-
-                if master_ws is not None:
-                    master_ws.cell(row=rec["row"], column=otp_col_idx, value=otp)
-                _record(cid, otp)
-                processed += 1
-                log.info("[%d/%d] Consumer %s -> OTP=%r (order ref %s)",
-                         i, total, cid, otp, order_ref)
-
-                # The small OTP file is saved every account (never lose an OTP);
-                # the big master is saved every 10 accounts and again at the end.
-                _safe_save(res_wb, otp_out)
-                if master_ws is not None and processed % 10 == 0:
-                    _safe_save(master_wb, master_out)
-                    log.info("Saved master progress (%d processed).", processed)
+                if pass_ok == 0:
+                    log.warning("No progress this pass -> stopping retries (%d still failing).", rem)
+                    break
+                breather = min(COOLDOWN_MS, 60_000) / 1000.0
+                if breather > 0:
+                    log.info("Retry pass next; pausing %.0fs first.", breather)
+                    time.sleep(breather)
         finally:
             try:
                 browser.close()

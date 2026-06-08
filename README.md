@@ -119,6 +119,25 @@ $env:BOT_BROWSER = "edge"     # chrome (default) | edge | brave | opera
 | `BOT_DEBUG` | Save a screenshot + page text/HTML per account to `output/debug/` |
 | `BOT_SHARD_INDEX` / `BOT_SHARD_COUNT` | Process only this worker's unique contiguous slice of the list (for parallel/multi-device runs) |
 | `BOT_OUT_SUFFIX` | Suffix the output filenames so parallel workers don't clash |
+| `BOT_ADAPTIVE` | `1` (default) auto-tunes the delay between logins to ride the portal's throttle; `0` = fixed `BOT_BETWEEN_MS` |
+| `BOT_MIN_BETWEEN_MS` / `BOT_MAX_BETWEEN_MS` | Bounds for the adaptive delay (default 3000 / 30000) |
+| `BOT_COOLDOWN_FAILS` / `BOT_COOLDOWN_MS` | After N failures in a row, pause this long to let the portal recover (default 5 / 120000) |
+| `BOT_AUTO_RETRY` / `BOT_MAX_PASSES` | `1` (default) keeps re-passing to retry failures until done or no progress, up to N passes (default 4) |
+
+## Adaptive pacing, auto-retry & CAPTCHA training
+
+- **Adaptive pacing** (`BOT_ADAPTIVE`, on by default): the gap between logins
+  grows after booking-page failures (the throttle signature), shrinks after a
+  run of clean successes, and a sustained failure streak triggers an automatic
+  cooldown. It rides the server's rate limit so you don't have to babysit it.
+- **Auto-retry** (`BOT_AUTO_RETRY`, on by default): after a full pass it keeps
+  re-passing — skipping captured accounts, retrying only failures — until
+  everything's captured or a pass makes no progress. Fire-and-forget.
+- **CAPTCHA training**: the bot saves every solved CAPTCHA to
+  `output/captcha_dataset/`. Run `python train_captcha.py` to inspect that set
+  and get the recipe to fine-tune a custom model; drop the result into
+  `output/captcha_model/` (`model.onnx` + `charsets.json`) and the bot uses it
+  automatically.
 
 ## Running in parallel / across devices
 
