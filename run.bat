@@ -21,6 +21,7 @@ REM Sensible defaults (override by setting them before launching if you like).
 if not defined BOT_BROWSER set "BOT_BROWSER=edge"
 if not defined BOT_SETTLE_MS set "BOT_SETTLE_MS=5000"
 if not defined BOT_BETWEEN_MS set "BOT_BETWEEN_MS=5000"
+if not defined BOT_START_ROW set "BOT_START_ROW=2"
 
 ".venv\Scripts\python.exe" run_bot.py
 

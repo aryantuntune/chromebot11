@@ -96,7 +96,7 @@ OUTPUT_DIR = "output"
 MASTER_SHEET = "Sheet1"
 MASTER_CONNO_COL = "A"     # consumer id (matched against the targets)
 MASTER_EMAIL_COL = "C"     # login id (email / mobile)
-MASTER_PWD_COL = "E"       # login password (e.g. 'shree1234')
+MASTER_PWD_COL = "D"       # login password
 
 TARGETS_CONNO_COL = "A"    # the targets file's consumer-id column
 
@@ -147,6 +147,10 @@ COOLDOWN_MS = int(os.environ.get("BOT_COOLDOWN_MS", "120000"))     # cooldown le
 # until everything's captured or a pass makes no progress, up to BOT_MAX_PASSES.
 AUTO_RETRY = os.environ.get("BOT_AUTO_RETRY", "1").strip().lower() not in ("0", "false", "no")
 MAX_PASSES = int(os.environ.get("BOT_MAX_PASSES", "4"))
+
+# Row in the master/targets file to start processing from (1-based, no header).
+# Rows before this are skipped. Set BOT_START_ROW=1 to process everything.
+START_ROW = int(os.environ.get("BOT_START_ROW", "1"))
 
 
 def _setup_logging() -> None:
@@ -442,18 +446,18 @@ def _classify_inputs(input_dir: str):
         wb = load_workbook(p, read_only=True)
         max_col = wb.active.max_column or 1
         wb.close()
-        (masters if max_col >= 5 else lists).append(p)
+        (masters if max_col >= 3 else lists).append(p)
 
     if not masters:
         raise FileNotFoundError(
-            "No master credentials file (a workbook with >=5 columns) found in input/."
-        )
-    if not lists:
-        raise FileNotFoundError(
-            "No targets file (a single-column list of consumer IDs) found in input/."
+            "No master credentials file (a workbook with >=3 columns) found in input/."
         )
     master = max(masters, key=lambda p: p.stat().st_mtime)
-    targets = max(lists, key=lambda p: p.stat().st_mtime)
+    if lists:
+        targets = max(lists, key=lambda p: p.stat().st_mtime)
+    else:
+        # Single-file mode: process all consumer IDs found in the master itself.
+        targets = master
     return master, targets
 
 
@@ -463,7 +467,7 @@ def _load_targets(path) -> list[str]:
     ws = wb.active
     col = column_index_from_string(TARGETS_CONNO_COL)
     ids: list[str] = []
-    for row in ws.iter_rows(min_col=col, max_col=col, values_only=True):
+    for row in ws.iter_rows(min_row=START_ROW, min_col=col, max_col=col, values_only=True):
         v = row[0]
         if v not in (None, ""):
             ids.append(_txt(v))
