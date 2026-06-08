@@ -35,6 +35,32 @@ import time
 
 from openpyxl import load_workbook
 
+# ── Single-instance lock ──────────────────────────────────────────────────────
+_LOCK_FILE = pathlib.Path("output/supervisor.lock")
+
+def _acquire_lock() -> bool:
+    """Write our PID to the lock file. Return False if another instance is running."""
+    _LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
+    if _LOCK_FILE.exists():
+        try:
+            other_pid = int(_LOCK_FILE.read_text().strip())
+            # Check if that PID is still alive
+            import ctypes
+            handle = ctypes.windll.kernel32.OpenProcess(0x0400, False, other_pid)
+            if handle:
+                ctypes.windll.kernel32.CloseHandle(handle)
+                return False   # still running
+        except Exception:
+            pass  # stale lock — take it
+    _LOCK_FILE.write_text(str(os.getpid()))
+    return True
+
+def _release_lock() -> None:
+    try:
+        _LOCK_FILE.unlink(missing_ok=True)
+    except Exception:
+        pass
+
 # ── Config ──────────────────────────────────────────────────────────────────
 INPUT_FILE          = os.environ.get("BOT_INPUT_FILE", "").strip()
 BETWEEN_RUNS_SEC    = int(os.environ.get("BOT_BETWEEN_RUNS_SEC",    "60"))
@@ -160,6 +186,12 @@ def _short_cooldown(secs: int, log) -> None:
 def main() -> int:
     _setup_logging()
     log = logging.getLogger("supervisor")
+
+    if not _acquire_lock():
+        log.error("Another supervisor is already running (see output/supervisor.lock). Exiting.")
+        return 1
+    import atexit
+    atexit.register(_release_lock)
 
     input_path = _find_input_file()
     log.info("Input file  : %s", input_path.name)
