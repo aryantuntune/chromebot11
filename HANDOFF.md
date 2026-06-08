@@ -4,6 +4,25 @@ Everything needed to run this bot on a **new device**. All code is already in
 this repo; this file covers the environment, the input files (which are *not*
 in the repo), and the operational settings that make it reliable.
 
+## Quick start (no coding, no AI assistant needed)
+
+The bot is **already built** — nothing needs to be re-created or "replicated".
+Just run it like any app:
+
+1. **Install Python 3.9+** from <https://python.org/downloads> (tick *Add Python
+   to PATH*), and have **Google Chrome** (or Edge) installed.
+2. **Download this repo** (green *Code → Download ZIP* on GitHub, or `git clone`),
+   and unzip it.
+3. **Double-click `setup.bat`** once — it builds the environment and installs
+   everything, including the CAPTCHA solver.
+4. Put your **two `.xlsx` files** in the `input\` folder (master credentials +
+   targets list — see section 4).
+5. **Double-click `run.bat`.** It runs hands-free: solves the CAPTCHA, retrieves
+   the OTPs, paces itself around the portal's throttle, and auto-retries
+   failures. Results land in `output\Captured_OTPs.xlsx`.
+
+That's it. The rest of this document is reference detail.
+
 ---
 
 ## 1. What the bot does
