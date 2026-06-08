@@ -148,6 +148,12 @@ COOLDOWN_MS = int(os.environ.get("BOT_COOLDOWN_MS", "120000"))     # cooldown le
 AUTO_RETRY = os.environ.get("BOT_AUTO_RETRY", "1").strip().lower() not in ("0", "false", "no")
 MAX_PASSES = int(os.environ.get("BOT_MAX_PASSES", "4"))
 
+# Self-contained single-file mode: a workbook that carries its own IDs, emails
+# and passwords (header row). BOT_START_ROW / BOT_END_ROW restrict to a 1-based,
+# inclusive spreadsheet row range so you can resume / cap a partially-done file.
+START_ROW = int(os.environ.get("BOT_START_ROW", "0"))
+END_ROW = int(os.environ.get("BOT_END_ROW", "0"))
+
 
 def _setup_logging() -> None:
     logging.basicConfig(
@@ -471,6 +477,67 @@ def _load_targets(path) -> list[str]:
     return ids
 
 
+def _detect_self_contained(input_dir: str):
+    """Return (path, colmap) for the newest input workbook that carries its own
+    credentials -- a header row with email + password columns -- else None.
+
+    colmap maps id/email/pwd/out to 1-based column indices.
+    """
+    best = None
+    for p in pathlib.Path(input_dir).glob("*.xlsx"):
+        if not p.is_file() or p.name.startswith("~$"):
+            continue
+        try:
+            wb = load_workbook(p, read_only=True)
+            header = next(wb.active.iter_rows(min_row=1, max_row=1, values_only=True), ())
+            wb.close()
+        except Exception:  # noqa: BLE001
+            continue
+        hdr = [_txt(h).lower() for h in header]
+        email_i = next((i for i, h in enumerate(hdr, 1) if "email" in h), None)
+        pwd_i = next((i for i, h in enumerate(hdr, 1) if h in ("pwd", "password", "pass")), None)
+        if not (email_i and pwd_i):
+            continue
+        id_i = next((i for i, h in enumerate(hdr, 1)
+                     if "consumer" in h or h in ("conno", "id", "consumerno")), 1)
+        out_i = next((i for i, h in enumerate(hdr, 1) if "otp" in h or "out" in h), None)
+        colmap = {"id": id_i, "email": email_i, "pwd": pwd_i, "out": out_i}
+        if best is None or p.stat().st_mtime > best[0].stat().st_mtime:
+            best = (p, colmap)
+    return best
+
+
+def _load_self_contained(path, colmap, start_row: int, end_row: int):
+    """Load a self-contained workbook (writable) and read its account rows.
+
+    Returns ``(workbook, worksheet, ordered_ids, info, out_col_idx)``. Rows
+    outside the 1-based inclusive [start_row, end_row] window are skipped
+    (0 = unbounded on that end). ``info[id] = {row, email, password}``.
+    """
+    wb = load_workbook(path, data_only=False)
+    ws = wb.active
+    id_c, em_c, pw_c = colmap["id"], colmap["email"], colmap["pwd"]
+    out_c = colmap["out"] or ((ws.max_column or 0) + 1)
+    lo = start_row if start_row else 2
+    hi = end_row if end_row else ws.max_row
+    ordered: list[str] = []
+    info: dict[str, dict] = {}
+    for r in range(2, ws.max_row + 1):
+        cid = ws.cell(r, id_c).value
+        if cid in (None, "") or r < lo or r > hi:
+            continue
+        key = _txt(cid)
+        if key in info:
+            continue
+        info[key] = {
+            "row": r,
+            "email": _txt(ws.cell(r, em_c).value),
+            "password": _txt(ws.cell(r, pw_c).value),
+        }
+        ordered.append(key)
+    return wb, ws, ordered, info, out_c
+
+
 def _load_master(path):
     """Open the master workbook (writable) and index it by consumer ID.
 
@@ -750,47 +817,56 @@ def main() -> int:
     _setup_logging()
     log = logging.getLogger("bot")
 
-    master_path, targets_path = _classify_inputs(INPUT_DIR)
-    log.info("Master credentials file : %s", master_path.name)
-    log.info("Targets (consumer IDs)  : %s", targets_path.name)
+    out_dir = pathlib.Path(OUTPUT_DIR)
+    out_dir.mkdir(parents=True, exist_ok=True)
 
-    target_ids = _load_targets(targets_path)
-    log.info("Loaded %d target consumer ID(s).", len(target_ids))
+    sc = _detect_self_contained(INPUT_DIR)
+    if sc is not None:
+        # --- Self-contained mode: one workbook holds IDs + email + password. ---
+        sc_path, colmap = sc
+        master_wb, master_ws, target_ids, info, otp_col_idx = _load_self_contained(
+            sc_path, colmap, START_ROW, END_ROW)
+        otp_col_letter = get_column_letter(otp_col_idx)
+        window = (f"rows {START_ROW or 2}..{END_ROW}" if END_ROW
+                  else (f"rows {START_ROW}+" if START_ROW else "all rows"))
+        log.info("Self-contained file: %s -> %d account(s) (%s); OTP -> column %s.",
+                 sc_path.name, len(target_ids), window, otp_col_letter)
+        master_out = out_dir / f"{sc_path.stem}.result.xlsx"
+        otp_out = out_dir / f"OTP_results_{sc_path.stem}.xlsx"
+    else:
+        # --- Master + targets mode. ---
+        master_path, targets_path = _classify_inputs(INPUT_DIR)
+        log.info("Master credentials file : %s", master_path.name)
+        log.info("Targets (consumer IDs)  : %s", targets_path.name)
+        target_ids = _load_targets(targets_path)
+        log.info("Loaded %d target consumer ID(s).", len(target_ids))
+        if MASTER_INDEX and pathlib.Path(MASTER_INDEX).exists():
+            info = json.loads(pathlib.Path(MASTER_INDEX).read_text(encoding="utf-8"))
+            master_wb = master_ws = None
+            otp_col_idx = None
+            otp_col_letter = "-"
+            log.info("Loaded prebuilt master index (%d ids); shard writes only its OTP file.",
+                     len(info))
+        else:
+            log.info("Loading master workbook (this can take ~20s on the big file)...")
+            master_wb, master_ws, info = _load_master(master_path)
+            log.info("Master indexed: %d unique consumer IDs.", len(info))
+            otp_col_idx = (master_ws.max_column or 0) + 1
+            otp_col_letter = get_column_letter(otp_col_idx)
+            log.info("OTP -> master column %s (new last column).", otp_col_letter)
+        master_out = out_dir / f"{master_path.stem}.result{OUT_SUFFIX}.xlsx"
+        otp_out = out_dir / f"OTP_results{OUT_SUFFIX}.xlsx"
 
-    # Sharding: take this worker's unique, contiguous slice of the list.
+    # Sharding + MAX_ROWS apply to the final target list in either mode.
     if SHARD_COUNT > 1:
         n = len(target_ids)
         per = -(-n // SHARD_COUNT)  # ceil division
         start = SHARD_INDEX * per
         target_ids = target_ids[start:start + per]
-        log.info("Shard %d/%d -> %d ids (positions %d..%d of %d).",
-                 SHARD_INDEX + 1, SHARD_COUNT, len(target_ids),
-                 start, start + len(target_ids) - 1, n)
+        log.info("Shard %d/%d -> %d ids.", SHARD_INDEX + 1, SHARD_COUNT, len(target_ids))
     if MAX_ROWS is not None:
         target_ids = target_ids[:MAX_ROWS]
         log.info("BOT_MAX_ROWS set -> processing only the first %d.", len(target_ids))
-
-    # Credentials lookup: a prebuilt index (shard mode) or the full master.
-    if MASTER_INDEX and pathlib.Path(MASTER_INDEX).exists():
-        info = json.loads(pathlib.Path(MASTER_INDEX).read_text(encoding="utf-8"))
-        master_wb = master_ws = None
-        otp_col_idx = None
-        otp_col_letter = "-"
-        log.info("Loaded prebuilt master index (%d ids); this shard writes only "
-                 "its OTP file, not the master copy.", len(info))
-    else:
-        log.info("Loading master workbook (this can take ~20s on the big file)...")
-        master_wb, master_ws, info = _load_master(master_path)
-        log.info("Master indexed: %d unique consumer IDs.", len(info))
-        # The OTP goes into a brand-new column at the very end of the master.
-        otp_col_idx = (master_ws.max_column or 0) + 1
-        otp_col_letter = get_column_letter(otp_col_idx)
-        log.info("OTP -> master column %s (new last column).", otp_col_letter)
-
-    out_dir = pathlib.Path(OUTPUT_DIR)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    master_out = out_dir / f"{master_path.stem}.result{OUT_SUFFIX}.xlsx"
-    otp_out = out_dir / f"OTP_results{OUT_SUFFIX}.xlsx"
 
     # Separate OTP results workbook (Consumer ID | OTP). Resume from a prior run
     # if one exists, so we only re-solve CAPTCHAs for what's left / what failed.
