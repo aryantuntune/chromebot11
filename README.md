@@ -117,6 +117,31 @@ $env:BOT_BROWSER = "edge"     # chrome (default) | edge | brave | opera
 | `BOT_BROWSER` | `chrome` (default), `edge`, `brave`, or `opera` |
 | `BOT_MAX_ROWS` | Process only the first N targets (handy for a test run) |
 | `BOT_DEBUG` | Save a screenshot + page text/HTML per account to `output/debug/` |
+| `BOT_SHARD_INDEX` / `BOT_SHARD_COUNT` | Process only this worker's unique contiguous slice of the list (for parallel/multi-device runs) |
+| `BOT_OUT_SUFFIX` | Suffix the output filenames so parallel workers don't clash |
+
+## Running in parallel / across devices
+
+Every account still costs **one login**, and the portal **throttles rapid logins
+per IP** — so the real speed-up is spreading the work over **multiple devices**
+(each with its own IP). Give each device a unique slice:
+
+```powershell
+# device 1 of 3
+$env:BOT_SHARD_INDEX="0"; $env:BOT_SHARD_COUNT="3"; .\.venv\Scripts\python.exe run_bot.py
+# device 2 -> BOT_SHARD_INDEX=1 ;  device 3 -> BOT_SHARD_INDEX=2
+```
+
+No consumer ID is ever processed by two devices. Merge each device's
+`OTP_results.xlsx` at the end.
+
+To try several browsers **on one machine** (Chrome + Brave + Edge at once),
+`run_parallel.py` shards the list and runs them concurrently, merging the
+results — but mind the shared-IP throttling (see its docstring):
+
+```powershell
+.\.venv\Scripts\python.exe run_parallel.py chrome,brave,edge
+```
 | `BOT_SETTLE_MS` | Pause (ms) after login before opening the booking page (default `3000`). The portal needs a moment to set up the session before the heavy booking grid will render — **raise this (e.g. `5000`) if the booking page often fails to load.** |
 | `BOT_BETWEEN_MS` | Pause (ms) between accounts (default `3000`) so logins don't hammer the portal back-to-back. |
 

@@ -188,7 +188,19 @@ resume later — the captured OTPs are saved and resume retries the rest.
 
 Running many bots from **one IP** makes the portal's throttling worse, so don't
 stack bots on a single machine. To go faster, split the consumer-ID list across
-**several devices** (each its own IP): give each device the **same master** file
-plus its **own targets** file (a slice of the IDs). They run independently and
-you **merge the OTP outputs** at the end. This `HANDOFF.md` + the repo are all a
-new device needs to join in.
+**several devices** (each its own IP). Two ways:
+
+- **Same targets file, sharded:** on each device set
+  `BOT_SHARD_COUNT=<#devices>` and a unique `BOT_SHARD_INDEX` (0,1,2,…). Each
+  device automatically takes a distinct, contiguous slice — no ID is processed
+  twice — and you merge each device's `OTP_results.xlsx` at the end.
+- **Or** give each device its own single-column targets file (a manual slice).
+
+To experiment with **several browsers on one machine** (Chrome+Brave+Edge at
+once), `run_parallel.py chrome,brave,edge` shards the list, runs them
+concurrently, and merges into `OTP_results.xlsx` + `Captured_OTPs.xlsx`. Caveat:
+they share one IP, so this can worsen throttling — it's for testing, not a
+guaranteed speed-up. The reliable parallelism is across devices.
+
+> The clean 3-column `Captured_OTPs.xlsx` (`Consumer ID | otp | value`) is now
+> regenerated automatically at the end of every normal run.

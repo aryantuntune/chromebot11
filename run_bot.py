@@ -123,6 +123,16 @@ CAPTCHA_MAX_TRIES = int(os.environ.get("BOT_CAPTCHA_TRIES", "15"))
 # the solver can be fine-tuned on over time.
 COLLECT_CAPTCHA = os.environ.get("BOT_CAPTCHA_DATASET", "1").strip().lower() not in ("0", "false", "no")
 
+# Parallel sharding: split the targets so each worker/browser takes a unique,
+# contiguous slice -- no consumer ID is ever processed by two workers, and no
+# login is ever reused across browsers. BOT_OUT_SUFFIX keeps per-shard output
+# files from clashing; BOT_MASTER_INDEX lets a shard load a prebuilt id->creds
+# map (built once by the parallel launcher) instead of re-loading the big master.
+SHARD_INDEX = int(os.environ.get("BOT_SHARD_INDEX", "0"))         # 0-based
+SHARD_COUNT = max(1, int(os.environ.get("BOT_SHARD_COUNT", "1")))
+OUT_SUFFIX = os.environ.get("BOT_OUT_SUFFIX", "")
+MASTER_INDEX = os.environ.get("BOT_MASTER_INDEX", "").strip()
+
 
 def _setup_logging() -> None:
     logging.basicConfig(
@@ -636,6 +646,22 @@ def _safe_save(wb, path) -> bool:
         return False
 
 
+def _write_captured_otps(res_ws, out_dir: str) -> int:
+    """Write the clean 3-column Captured_OTPs.xlsx (Consumer ID | otp | value)."""
+    cap = Workbook()
+    cw = cap.active
+    cw.title = "OTPs"
+    found = 0
+    for r in range(2, res_ws.max_row + 1):
+        cid = _txt(res_ws.cell(r, 1).value)
+        val = _txt(res_ws.cell(r, 2).value)
+        if cid and re.fullmatch(r"\d{3,8}", val):
+            cw.append([cid, "otp", val])
+            found += 1
+    _safe_save(cap, pathlib.Path(out_dir) / "Captured_OTPs.xlsx")
+    return found
+
+
 def main() -> int:
     _setup_logging()
     log = logging.getLogger("bot")
@@ -646,23 +672,41 @@ def main() -> int:
 
     target_ids = _load_targets(targets_path)
     log.info("Loaded %d target consumer ID(s).", len(target_ids))
+
+    # Sharding: take this worker's unique, contiguous slice of the list.
+    if SHARD_COUNT > 1:
+        n = len(target_ids)
+        per = -(-n // SHARD_COUNT)  # ceil division
+        start = SHARD_INDEX * per
+        target_ids = target_ids[start:start + per]
+        log.info("Shard %d/%d -> %d ids (positions %d..%d of %d).",
+                 SHARD_INDEX + 1, SHARD_COUNT, len(target_ids),
+                 start, start + len(target_ids) - 1, n)
     if MAX_ROWS is not None:
         target_ids = target_ids[:MAX_ROWS]
         log.info("BOT_MAX_ROWS set -> processing only the first %d.", len(target_ids))
 
-    log.info("Loading master workbook (this can take ~20s on the big file)...")
-    master_wb, master_ws, info = _load_master(master_path)
-    log.info("Master indexed: %d unique consumer IDs.", len(info))
-
-    # The OTP goes into a brand-new column at the very end of the master.
-    otp_col_idx = (master_ws.max_column or 0) + 1
-    otp_col_letter = get_column_letter(otp_col_idx)
-    log.info("OTP -> master column %s (new last column).", otp_col_letter)
+    # Credentials lookup: a prebuilt index (shard mode) or the full master.
+    if MASTER_INDEX and pathlib.Path(MASTER_INDEX).exists():
+        info = json.loads(pathlib.Path(MASTER_INDEX).read_text(encoding="utf-8"))
+        master_wb = master_ws = None
+        otp_col_idx = None
+        otp_col_letter = "-"
+        log.info("Loaded prebuilt master index (%d ids); this shard writes only "
+                 "its OTP file, not the master copy.", len(info))
+    else:
+        log.info("Loading master workbook (this can take ~20s on the big file)...")
+        master_wb, master_ws, info = _load_master(master_path)
+        log.info("Master indexed: %d unique consumer IDs.", len(info))
+        # The OTP goes into a brand-new column at the very end of the master.
+        otp_col_idx = (master_ws.max_column or 0) + 1
+        otp_col_letter = get_column_letter(otp_col_idx)
+        log.info("OTP -> master column %s (new last column).", otp_col_letter)
 
     out_dir = pathlib.Path(OUTPUT_DIR)
     out_dir.mkdir(parents=True, exist_ok=True)
-    master_out = out_dir / f"{master_path.stem}.result.xlsx"
-    otp_out = out_dir / OTP_RESULTS_NAME
+    master_out = out_dir / f"{master_path.stem}.result{OUT_SUFFIX}.xlsx"
+    otp_out = out_dir / f"OTP_results{OUT_SUFFIX}.xlsx"
 
     # Separate OTP results workbook (Consumer ID | OTP). Resume from a prior run
     # if one exists, so we only re-solve CAPTCHAs for what's left / what failed.
@@ -708,7 +752,8 @@ def main() -> int:
                 # (so master_out stays complete) and skip the browser/CAPTCHA.
                 prev = res_ws.cell(row=res_rows[cid], column=2).value if cid in res_rows else None
                 if prev is not None and not _needs_retry(prev):
-                    master_ws.cell(row=rec["row"], column=otp_col_idx, value=prev)
+                    if master_ws is not None:
+                        master_ws.cell(row=rec["row"], column=otp_col_idx, value=prev)
                     skipped += 1
                     log.info("[%d/%d] Consumer %s -> already have %r, skipping.",
                              i, total, cid, _txt(prev))
@@ -729,7 +774,8 @@ def main() -> int:
                     log.exception("Consumer %s failed: %s", cid, ex)
                     otp, order_ref = (f"ERROR: {ex}", "")
 
-                master_ws.cell(row=rec["row"], column=otp_col_idx, value=otp)
+                if master_ws is not None:
+                    master_ws.cell(row=rec["row"], column=otp_col_idx, value=otp)
                 _record(cid, otp)
                 processed += 1
                 log.info("[%d/%d] Consumer %s -> OTP=%r (order ref %s)",
@@ -738,7 +784,7 @@ def main() -> int:
                 # The small OTP file is saved every account (never lose an OTP);
                 # the big master is saved every 10 accounts and again at the end.
                 _safe_save(res_wb, otp_out)
-                if processed % 10 == 0:
+                if master_ws is not None and processed % 10 == 0:
                     _safe_save(master_wb, master_out)
                     log.info("Saved master progress (%d processed).", processed)
         finally:
@@ -748,11 +794,16 @@ def main() -> int:
                 pass
 
     _safe_save(res_wb, otp_out)
-    _safe_save(master_wb, master_out)
+    if master_ws is not None:
+        _safe_save(master_wb, master_out)
+        # Auto-generate the clean 3-column OTP file (normal, non-shard runs).
+        ncap = _write_captured_otps(res_ws, OUTPUT_DIR)
+        log.info("Captured OTPs (clean 3-col) -> %d in output/Captured_OTPs.xlsx", ncap)
     log.info("Done. %d processed, %d already-had, %d total target(s).",
              processed, skipped, total)
     log.info("OTP list  -> %s", otp_out)
-    log.info("Master+OTP (column %s) -> %s", otp_col_letter, master_out)
+    if master_ws is not None:
+        log.info("Master+OTP (column %s) -> %s", otp_col_letter, master_out)
     return 0
 
 
