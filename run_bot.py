@@ -721,6 +721,27 @@ def _process_row(browser, email: str, password: str) -> tuple[str, str]:
         pwd_field.wait_for(state="visible")
         pwd_field.fill(password)
 
+        # 3b. Verify both fields are actually populated before submitting. The
+        #     CAPTCHA submit is an ASP.NET postback; under load it can re-render
+        #     or clear the email/password field mid-fill, so the bot would click
+        #     Login with an empty password ("doesn't enter the pass"). Re-fill
+        #     whatever the postback wiped, up to a few times.
+        for _ in range(4):
+            try:
+                email_box = page.locator(SEL_EMAIL).first
+                email_ok = bool((email_box.input_value() or "").strip())
+                pwd_ok = bool((pwd_field.input_value() or "").strip())
+            except Exception:  # noqa: BLE001 - field momentarily detached
+                page.wait_for_timeout(300)
+                continue
+            if email_ok and pwd_ok:
+                break
+            if not email_ok:
+                email_box.fill(email)
+            if not pwd_ok:
+                pwd_field.fill(password)
+            page.wait_for_timeout(300)
+
         # 4. Submit.
         page.locator(SEL_LOGIN_BTN).first.click()
 
