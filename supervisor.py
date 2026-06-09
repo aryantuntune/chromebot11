@@ -29,7 +29,6 @@ import logging
 import os
 import pathlib
 import re
-import subprocess
 import sys
 import time
 
@@ -81,7 +80,6 @@ _RETRY_MARKERS = (
     "CAPTURE_ERROR", "ERROR", "CAPTCHA_FAILED",
 )
 
-PYTHON = str(pathlib.Path(sys.executable))
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -249,12 +247,16 @@ def main() -> int:
         env.setdefault("BOT_AUTO_RETRY",  "1")
         env.setdefault("BOT_ADAPTIVE",    "1")
 
-        log.info("Launching run_bot.py  (MAX_PASSES=%d)...", MAX_PASSES_PER_RUN)
+        log.info("Launching run_bot (MAX_PASSES=%d)...", MAX_PASSES_PER_RUN)
+        # Call run_bot.main() directly — avoids a Windows venv quirk where
+        # subprocess.run([sys.executable, "run_bot.py"]) spawns an extra
+        # python process with the same command line as the supervisor itself.
+        for k, v in env.items():
+            os.environ[k] = v
         try:
-            proc = subprocess.run(
-                [PYTHON, "run_bot.py"],
-                env=env,
-            )
+            import importlib, run_bot as _rb
+            importlib.reload(_rb)
+            _rb.main()
         except KeyboardInterrupt:
             log.warning("Interrupted by user. Saving current status.")
             break
