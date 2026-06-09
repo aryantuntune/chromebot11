@@ -119,6 +119,10 @@ BETWEEN_MS = int(os.environ.get("BOT_BETWEEN_MS", "3000"))  # pause between acco
 # allows unlimited tries, so a wrong guess just refreshes and we try again.
 AUTO_CAPTCHA = os.environ.get("BOT_AUTO_CAPTCHA", "1").strip().lower() not in ("0", "false", "no")
 CAPTCHA_MAX_TRIES = int(os.environ.get("BOT_CAPTCHA_TRIES", "15"))
+# How long to wait for the password field after submitting a CAPTCHA guess. A
+# CORRECT guess reveals the field; too short a wait wrongly rejects it when the
+# portal is throttled/slow (-> false CAPTCHA_FAILED). Default 9s.
+CAPTCHA_PWD_WAIT_MS = int(os.environ.get("BOT_CAPTCHA_PWD_WAIT_MS", "9000"))
 # Save every confirmed-correct (image, text) pair, building a training set that
 # the solver can be fine-tuned on over time.
 COLLECT_CAPTCHA = os.environ.get("BOT_CAPTCHA_DATASET", "1").strip().lower() not in ("0", "false", "no")
@@ -299,7 +303,7 @@ def _auto_solve_captcha(page) -> bool:
         try:
             page.fill(SEL_CAPTCHA, guess)
             page.locator(SEL_CAPTCHA).press("Enter")
-            pwd.wait_for(state="visible", timeout=4_000)
+            pwd.wait_for(state="visible", timeout=CAPTCHA_PWD_WAIT_MS)
         except PlaywrightTimeoutError:
             _refresh_captcha(page)   # wrong guess -> fresh image, try again
             continue

@@ -15,9 +15,9 @@ if not exist ".venv\Scripts\python.exe" (
 )
 
 REM --- Settings (edit as needed) ---------------------------------------
-REM Row window to process (1-based, inclusive). Blank both = whole file.
-if not defined BOT_START_ROW set "BOT_START_ROW=247"
-if not defined BOT_END_ROW   set "BOT_END_ROW=312"
+REM Row window to process (1-based, inclusive). START=2 & END=0 = whole file.
+if not defined BOT_START_ROW set "BOT_START_ROW=2"
+if not defined BOT_END_ROW   set "BOT_END_ROW=0"
 if not defined BOT_BROWSER       set "BOT_BROWSER=edge"
 if not defined BOT_AUTO_CAPTCHA  set "BOT_AUTO_CAPTCHA=1"
 if not defined BOT_ADAPTIVE      set "BOT_ADAPTIVE=1"

@@ -13,8 +13,8 @@ if not exist ".venv\Scripts\python.exe" (
   echo Environment missing. Run setup.bat first. & pause & exit /b 1
 )
 
-REM Match the row window the bot is processing (leave blank = whole file).
-if not defined BOT_START_ROW set "BOT_START_ROW=247"
-if not defined BOT_END_ROW   set "BOT_END_ROW=312"
+REM Match the row window the bot is processing (START=2 & END=0 = whole file).
+if not defined BOT_START_ROW set "BOT_START_ROW=2"
+if not defined BOT_END_ROW   set "BOT_END_ROW=0"
 
 ".venv\Scripts\python.exe" dashboard.py
