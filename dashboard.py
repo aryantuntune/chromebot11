@@ -10,8 +10,16 @@ from __future__ import annotations
 import json
 import pathlib
 import re
+import sys
 import time
 from datetime import datetime
+
+# Force UTF-8 output so the ✔ / ⚠ / 📦 glyphs never crash on a legacy
+# (cp1252) Windows console.
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
 
 from openpyxl import load_workbook
 from rich import box
