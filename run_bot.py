@@ -123,6 +123,12 @@ CAPTCHA_MAX_TRIES = int(os.environ.get("BOT_CAPTCHA_TRIES", "15"))
 # CORRECT guess reveals the field; too short a wait wrongly rejects it when the
 # portal is throttled/slow (-> false CAPTCHA_FAILED). Default 9s.
 CAPTCHA_PWD_WAIT_MS = int(os.environ.get("BOT_CAPTCHA_PWD_WAIT_MS", "9000"))
+
+# Network resilience: a brief Wi-Fi/internet blip makes page.goto fail with
+# net::ERR_INTERNET_DISCONNECTED (etc.), which would instantly fail the account.
+# Instead, wait BOT_NET_RETRY_MS and retry the navigation up to BOT_NET_RETRIES.
+NET_RETRIES = int(os.environ.get("BOT_NET_RETRIES", "3"))
+NET_RETRY_MS = int(os.environ.get("BOT_NET_RETRY_MS", "15000"))
 # Save every confirmed-correct (image, text) pair, building a training set that
 # the solver can be fine-tuned on over time.
 COLLECT_CAPTCHA = os.environ.get("BOT_CAPTCHA_DATASET", "1").strip().lower() not in ("0", "false", "no")
@@ -686,6 +692,43 @@ def _open_booking_history(page) -> bool:
     return False
 
 
+_NET_ERR_HINTS = (
+    "ERR_INTERNET_DISCONNECTED", "ERR_NETWORK_CHANGED", "ERR_NAME_NOT_RESOLVED",
+    "ERR_CONNECTION_", "ERR_PROXY_CONNECTION", "ERR_TIMED_OUT",
+    "ERR_ADDRESS_UNREACHABLE", "NS_ERROR", "net::",
+)
+
+
+def _is_network_error(exc: Exception) -> bool:
+    msg = str(exc)
+    return any(h in msg for h in _NET_ERR_HINTS)
+
+
+def _goto_with_retry(page, url: str) -> None:
+    """Navigate to ``url``, surviving transient internet drops.
+
+    A Wi-Fi/internet blip makes goto raise net::ERR_INTERNET_DISCONNECTED, which
+    would otherwise instantly fail the account. We wait and retry instead, so the
+    account recovers once the connection is back.
+    """
+    log = logging.getLogger("bot")
+    last = None
+    for attempt in range(1, NET_RETRIES + 2):  # initial try + NET_RETRIES retries
+        try:
+            page.goto(url)
+            return
+        except Exception as e:  # noqa: BLE001
+            last = e
+            if not _is_network_error(e) or attempt > NET_RETRIES:
+                raise
+            log.warning("    network blip (%s); waiting %ds and retrying (%d/%d)...",
+                        str(e).split('\n')[0][:60], NET_RETRY_MS // 1000,
+                        attempt, NET_RETRIES)
+            page.wait_for_timeout(NET_RETRY_MS)
+    if last:
+        raise last
+
+
 def _process_row(browser, email: str, password: str) -> tuple[str, str]:
     """Run the recorded flow once for a single row; return the result string."""
     context = browser.new_context()
@@ -695,7 +738,7 @@ def _process_row(browser, email: str, password: str) -> tuple[str, str]:
     page = context.new_page()
     page.on("dialog", lambda d: d.accept())
     try:
-        page.goto(LOGIN_URL)
+        _goto_with_retry(page, LOGIN_URL)
 
         # 1. Email.
         email_field = page.locator(SEL_EMAIL).first
