@@ -1,4 +1,4 @@
-"""Live dashboard for the HP Gas OTP bot.
+r"""Live dashboard for the HP Gas OTP bot.
 
 Run in a separate terminal while supervisor.py (or run_bot.py) is active:
     .venv\Scripts\python.exe dashboard.py
@@ -22,11 +22,16 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
+import os
+
 REFRESH_SEC  = 3
 OUTPUT_DIR   = pathlib.Path("output")
 OTP_RESULTS  = OUTPUT_DIR / "OTP_results.xlsx"
 CAP_STATS    = OUTPUT_DIR / "captcha_stats.json"
 SUP_STATUS   = OUTPUT_DIR / "supervisor_status.json"
+# Same 1-based inclusive row window the supervisor/bot use (0 = unbounded).
+START_ROW    = int(os.environ.get("BOT_START_ROW", "0"))
+END_ROW      = int(os.environ.get("BOT_END_ROW",   "0"))
 
 _RETRY_MARKERS = (
     "NO_BOOKING_TABLE", "NO_BOOKINGS", "EMPTY_STATUS",
@@ -57,8 +62,15 @@ def _find_input_file():
     try:
         wb = load_workbook(str(best), read_only=True, data_only=True)
         ws = wb.active
-        ids = [str(r[0]).strip() for r in ws.iter_rows(min_row=2, max_col=1, values_only=True)
-               if r[0] not in (None, "")]
+        lo = START_ROW if START_ROW else 2
+        hi = END_ROW if END_ROW else ws.max_row
+        ids = []
+        for r in range(2, ws.max_row + 1):
+            if r < lo or r > hi:
+                continue
+            v = ws.cell(r, 1).value
+            if v not in (None, ""):
+                ids.append(str(v).strip())
         wb.close()
         return best, ids
     except Exception:

@@ -13,3 +13,6 @@ PyYAML>=6.0
 # Automatic CAPTCHA solving (OCR). Pulls onnxruntime, opencv-python, Pillow.
 # Set BOT_AUTO_CAPTCHA=0 to fall back to manual (human) CAPTCHA solving.
 ddddocr>=1.6
+
+# Live terminal dashboard (dashboard.py).
+rich>=13.0

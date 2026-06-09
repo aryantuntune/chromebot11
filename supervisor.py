@@ -1,4 +1,4 @@
-"""Supervisor: runs run_bot.py repeatedly until every target account has an OTP.
+r"""Supervisor: runs run_bot.py repeatedly until every target account has an OTP.
 
 Usage (from chromebot11 directory):
     .venv\Scripts\python.exe supervisor.py
@@ -67,6 +67,10 @@ BETWEEN_RUNS_SEC    = int(os.environ.get("BOT_BETWEEN_RUNS_SEC",    "60"))
 STALL_COOLDOWN_SEC  = int(os.environ.get("BOT_STALL_COOLDOWN_SEC", "300"))
 MAX_STALLS          = int(os.environ.get("BOT_MAX_STALLS",           "3"))
 MAX_PASSES_PER_RUN  = int(os.environ.get("BOT_MAX_PASSES",           "6"))
+# 1-based inclusive spreadsheet row window (0 = unbounded). Lets the supervisor
+# track only the slice the bot is told to process (e.g. rows 247..312).
+START_ROW           = int(os.environ.get("BOT_START_ROW", "0"))
+END_ROW             = int(os.environ.get("BOT_END_ROW",   "0"))
 
 OUTPUT_DIR   = pathlib.Path("output")
 OTP_RESULTS  = OUTPUT_DIR / "OTP_results.xlsx"
@@ -116,11 +120,16 @@ def _find_input_file() -> pathlib.Path:
 
 
 def _load_target_ids(path: pathlib.Path) -> list[str]:
+    """Consumer IDs from column A, restricted to the [START_ROW, END_ROW] window."""
     wb = load_workbook(str(path), read_only=True, data_only=True)
     ws = wb.active
+    lo = START_ROW if START_ROW else 2
+    hi = END_ROW if END_ROW else ws.max_row
     ids = []
-    for row in ws.iter_rows(min_row=2, max_col=1, values_only=True):
-        v = row[0]
+    for r in range(2, ws.max_row + 1):
+        if r < lo or r > hi:
+            continue
+        v = ws.cell(r, 1).value
         if v not in (None, ""):
             ids.append(str(v).strip())
     wb.close()
@@ -230,7 +239,10 @@ def main() -> int:
         # ── Launch bot subprocess ─────────────────────────────────────────
         env = os.environ.copy()
         env["BOT_MAX_PASSES"] = str(MAX_PASSES_PER_RUN)
-        env["BOT_START_ROW"]  = "2"
+        # Pass the row window through to run_bot (it reads BOT_START_ROW/END_ROW).
+        env["BOT_START_ROW"]  = str(START_ROW) if START_ROW else "2"
+        if END_ROW:
+            env["BOT_END_ROW"] = str(END_ROW)
         env.setdefault("BOT_BROWSER",     "edge")
         env.setdefault("BOT_SETTLE_MS",   "5000")
         env.setdefault("BOT_BETWEEN_MS",  "5000")

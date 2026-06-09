@@ -852,8 +852,10 @@ def main() -> int:
                   else (f"rows {START_ROW}+" if START_ROW else "all rows"))
         log.info("Self-contained file: %s -> %d account(s) (%s); OTP -> column %s.",
                  sc_path.name, len(target_ids), window, otp_col_letter)
-        master_out = out_dir / f"{sc_path.stem}.result.xlsx"
-        otp_out = out_dir / f"OTP_results_{sc_path.stem}.xlsx"
+        master_out = out_dir / f"{sc_path.stem}.result{OUT_SUFFIX}.xlsx"
+        # Write the DEFAULT OTP_results name so supervisor.py / dashboard.py
+        # (which read output/OTP_results.xlsx) see this run's progress.
+        otp_out = out_dir / f"OTP_results{OUT_SUFFIX}.xlsx"
     else:
         # --- Master + targets mode. ---
         master_path, targets_path = _classify_inputs(INPUT_DIR)
